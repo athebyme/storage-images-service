@@ -144,9 +144,8 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 	defer limiter.Stop()
 
 	errCh := make(chan error, len(media))
-
+	wg.Add(len(media))
 	for productID, urls := range media {
-		wg.Add(1)
 		go func(productID string, urls []string) {
 			id, err := strconv.Atoi(productID)
 			if err != nil {
