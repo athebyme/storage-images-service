@@ -1,6 +1,7 @@
 package database
 
 import (
+	"awesomeProject1/types"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -8,13 +9,12 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/lib/pq"
+	_ "github.com/lib/pq"
 	"gopkg.in/yaml.v3"
 	"log"
 	"os"
-	"strings"
 	"sync"
-
-	_ "github.com/lib/pq"
 )
 
 type Article struct {
@@ -49,9 +49,13 @@ func (pc *PostgresConfiguration) LoadConfig(filename string) (*PostgresConfigura
 	return config, nil
 }
 
-type DatabaseDriver interface {
+type Driver interface {
 	GetArticlesByIDs(ids []int) (map[int][]string, error)
 	GetArticles() (map[int]struct{}, error)
+	UpdateImageStatus(status types.ProcessStatus) error
+	GetAllImageStatuses() ([]types.ProcessStatus, error)
+	GetImageStatusesByProductIDs(productIDs []int) ([]types.ProcessStatus, error)
+	CreateRecords(records []Article) error
 }
 
 type PostgresDriver struct {
@@ -68,15 +72,8 @@ func NewPostgresDriver(connectionString string) (*PostgresDriver, error) {
 }
 
 func (p *PostgresDriver) GetArticlesByIDs(ids []int) (map[int][]string, error) {
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id
-	}
-
-	query := fmt.Sprintf(`SELECT articular, urls FROM storage.images WHERE articular IN (%s)`, strings.Join(placeholders, ", "))
-	rows, err := p.db.Query(query, args...)
+	query := fmt.Sprintf(`SELECT product_id, urls FROM storage.images WHERE product_id = ANY($1)`)
+	rows, err := p.db.Query(query, pq.Array(ids))
 	if err != nil {
 		return nil, fmt.Errorf("failed to query articles: %w", err)
 	}
@@ -99,8 +96,24 @@ func (p *PostgresDriver) GetArticlesByIDs(ids []int) (map[int][]string, error) {
 	return result, nil
 }
 
+func (p *PostgresDriver) UpdateImageStatus(status types.ProcessStatus) error {
+	query := `
+        INSERT INTO storage.images_status (product_id, status, timestamp)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (product_id) DO UPDATE
+        SET status = EXCLUDED.status, timestamp = EXCLUDED.timestamp;
+    `
+	p.Lock()
+	_, err := p.db.Exec(query, status.ProductID, status.Status, status.Timestamp)
+	p.Unlock()
+	if err != nil {
+		return fmt.Errorf("failed to update image status: %w", err)
+	}
+	return nil
+}
+
 func (p *PostgresDriver) GetArticles() (map[int]struct{}, error) {
-	query := fmt.Sprintf(`SELECT articular FROM storage.images`)
+	query := fmt.Sprintf(`SELECT product_id FROM storage.images`)
 	rows, err := p.db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query articles: %w", err)
@@ -123,11 +136,54 @@ func (p *PostgresDriver) GetArticles() (map[int]struct{}, error) {
 	return result, nil
 }
 
+func (p *PostgresDriver) GetAllImageStatuses() ([]types.ProcessStatus, error) {
+	query := `SELECT product_id, status, timestamp FROM storage.images_status`
+	rows, err := p.db.Query(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query all image statuses: %w", err)
+	}
+	defer rows.Close()
+
+	var statuses []types.ProcessStatus
+	for rows.Next() {
+		var status types.ProcessStatus
+		if err := rows.Scan(&status.ProductID, &status.Status, &status.Timestamp); err != nil {
+			return nil, fmt.Errorf("failed to scan image status: %w", err)
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
+func (p *PostgresDriver) GetImageStatusesByProductIDs(productIDs []int) ([]types.ProcessStatus, error) {
+	query := `SELECT product_id, status, timestamp FROM storage.images_status WHERE product_id = ANY($1)`
+	rows, err := p.db.Query(query, pq.Array(productIDs))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query image statuses by product IDs: %w", err)
+	}
+	defer rows.Close()
+
+	var statuses []types.ProcessStatus
+	for rows.Next() {
+		var status types.ProcessStatus
+		if err := rows.Scan(&status.ProductID, &status.Status, &status.Timestamp); err != nil {
+			return nil, fmt.Errorf("failed to scan image status: %w", err)
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
 func (p *PostgresDriver) Close() error {
 	return p.db.Close()
 }
 
 func (p *PostgresDriver) CreateRecord(record Article) error {
+	for _, url := range record.Photos {
+		if url == "" {
+			return fmt.Errorf("url is empty")
+		}
+	}
 	// Преобразуем массив фоток в JSON
 	photosJSON, err := json.Marshal(record.Photos)
 	if err != nil {
@@ -136,7 +192,7 @@ func (p *PostgresDriver) CreateRecord(record Article) error {
 
 	// SQL-запрос для вставки записи
 	query := `
-		INSERT INTO storage.images (articular, urls)
+		INSERT INTO storage.images (product_id, urls)
 		VALUES ($1, $2)
 		ON CONFLICT (articular) DO NOTHING;
 	`
@@ -146,6 +202,45 @@ func (p *PostgresDriver) CreateRecord(record Article) error {
 	_, err = p.db.Exec(query, record.ID, photosJSON)
 	if err != nil {
 		return fmt.Errorf("failed to insert or update record: %w", err)
+	}
+	p.Unlock()
+
+	return nil
+}
+
+func (p *PostgresDriver) CreateRecords(records []Article) error {
+	// Подготовка данных для одной записи
+	type Record struct {
+		ProductID int      `json:"product_id"`
+		URLs      []string `json:"urls"`
+	}
+
+	var combinedRecord []Record
+	for _, record := range records {
+		combinedRecord = append(combinedRecord, Record{
+			ProductID: record.ID,
+			URLs:      record.Photos,
+		})
+	}
+
+	// Преобразуем запись в JSON
+	combinedRecordJSON, err := json.Marshal(combinedRecord)
+	if err != nil {
+		return fmt.Errorf("failed to serialize combined record: %w", err)
+	}
+
+	// SQL-запрос для вставки записи
+	query := `
+        INSERT INTO storage.images (product_id, urls)
+        VALUES ($1::json)
+        ON CONFLICT (product_id) DO NOTHING;
+    `
+
+	// Выполняем запрос
+	p.Lock()
+	_, err = p.db.Exec(query, combinedRecordJSON)
+	if err != nil {
+		return fmt.Errorf("failed to insert or update combined record: %w", err)
 	}
 	p.Unlock()
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	mydb "awesomeProject1/database"
+	"awesomeProject1/types"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,10 +25,10 @@ import (
 )
 
 type Server struct {
-	db mydb.DatabaseDriver
+	db mydb.Driver
 }
 
-func NewServer(db mydb.DatabaseDriver) *Server {
+func NewServer(db mydb.Driver) *Server {
 	return &Server{db: db}
 }
 
@@ -89,7 +91,6 @@ func downloadImage(ctx context.Context, url, outputPath string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("failed to download image: %s", resp.Status)
 	}
-	log.Printf("Dowloaded image %s", url)
 
 	file, err := os.Create(outputPath)
 	if err != nil {
@@ -125,8 +126,62 @@ func fetchRemoteMedia(productIDs []int) (MediaResponse, error) {
 	return mediaResponse, nil
 }
 
-func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, error) {
-	localMedia := make(MediaResponse)
+func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Signal received")
+
+	// Ответим сразу с кодом 200
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"processing"}`))
+
+	// Создаем новый контекст для асинхронной обработки
+	ctx := context.Background()
+	ctx = context.WithValue(ctx, "db", s.db)
+	ids, err := s.db.GetArticles()
+	if err != nil {
+		log.Fatalf("Cant get exist articles from db!")
+	}
+
+	ctx = context.WithValue(ctx, "exist_ids", ids)
+
+	var req MediaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("Invalid request: %v", err)
+		return
+	}
+
+	// Выполнение долгой задачи в новой горутине
+	go func() {
+		defer ctx.Done()
+
+		statusChan := make(chan types.ProcessStatus, len(req.ProductIDs)) // Новый канал для статусов
+
+		log.Printf("Fetch data from remote API...")
+		remoteMedia, err := fetchRemoteMedia(req.ProductIDs)
+		if err != nil {
+			log.Printf("Error fetching remote media: %v", err)
+			return
+		}
+
+		log.Printf("Processing media...")
+		if err = processMedia(ctx, remoteMedia, statusChan); err != nil {
+			log.Printf("Error processing media: %v", err)
+			return
+		}
+
+		// Обработка статусов после завершения обработки медиа
+		for status := range statusChan {
+			if err := s.db.UpdateImageStatus(status); err != nil {
+				log.Printf("Failed to update image status: %v", err)
+			}
+		}
+
+		log.Printf("Media processing completed successfully")
+	}()
+}
+
+func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- types.ProcessStatus) error {
+	defer close(statusChan)
 	idsSync := sync.Map{}
 
 	var mu sync.Mutex
@@ -139,50 +194,83 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 		}
 	}
 
-	semaphore := make(chan struct{}, 100)
 	limiter := time.NewTicker(time.Minute / 200)
 	defer limiter.Stop()
 
 	errCh := make(chan error, len(media))
+	photoLoadCh := make(chan mydb.Article, 100)
+	semaphore := make(chan struct{}, 100)
+
+	driver, ok := ctx.Value("db").(*mydb.PostgresDriver)
+	if !ok {
+		return fmt.Errorf("db is not set to the context")
+	}
+
+	batch := make(chan []mydb.Article, 1)
+
+	wg.Add(1)
+	go func() {
+		var loadBatch []mydb.Article
+		defer func() {
+			if len(loadBatch) > 0 {
+				batch <- loadBatch
+				loadBatch = []mydb.Article{}
+			}
+			close(batch)
+			wg.Done()
+		}()
+		for article := range photoLoadCh {
+			loadBatch = append(loadBatch, article)
+			log.Printf("Article %d is done", article.ID)
+			if len(loadBatch) == 100 {
+				batch <- loadBatch
+				loadBatch = []mydb.Article{}
+			}
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer func() {
+			wg.Done()
+			close(errCh)
+		}()
+		for locBatch := range batch {
+			err := driver.CreateRecords(locBatch)
+			if err != nil {
+				log.Printf("Failed to upload batch: %v", err)
+				errCh <- err
+				return
+			}
+			log.Printf("Uploaded batch")
+		}
+	}()
+
 	wg.Add(len(media))
+
 	for productID, urls := range media {
 		go func(productID string, urls []string) {
+			localURLs := make([]string, len(urls))
+			defer wg.Done()
+
 			id, err := strconv.Atoi(productID)
 			if err != nil {
+				log.Printf("Failed to convert productID to int: %v", err)
+				statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 				errCh <- err
-			}
-
-			if _, ok := idsSync.Load(id); ok {
 				return
 			}
 
-			localURLs := make([]string, len(urls))
-
-			defer wg.Done()
-			defer func() {
-				id, err := strconv.Atoi(productID)
-				if err != nil {
-					errCh <- err
-				}
-
-				driver, ok := ctx.Value("db").(*mydb.PostgresDriver)
-				if !ok {
-					errCh <- fmt.Errorf("db is not set to the context")
-				}
-
-				err = driver.CreateRecord(mydb.Article{ID: id, Photos: localURLs})
-				if err != nil {
-					errCh <- err
-				}
-				log.Printf("created db record")
-
-			}()
+			if _, ok := idsSync.Load(id); ok {
+				statusChan <- types.ProcessStatus{ProductID: id, Status: "exists", Timestamp: time.Now()}
+				return
+			}
 
 			for i, url := range urls {
-
 				select {
 				case <-ctx.Done():
-					log.Printf("Ctx end ! ")
+					log.Printf("Ctx end!")
+					statusChan <- types.ProcessStatus{ProductID: id, Status: "cancelled", Timestamp: time.Now()}
 					errCh <- ctx.Err()
 					return
 				default:
@@ -192,12 +280,11 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 
 				semaphore <- struct{}{}
 				func() {
-					defer func() {
-						<-semaphore
-					}()
+					defer func() { <-semaphore }()
 
 					outputDir := filepath.Join(storageDir, productID)
 					if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
+						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
 					}
@@ -205,17 +292,20 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 
 					tempPath := outputPath + ".tmp"
 					if err := downloadImage(ctx, url, tempPath); err != nil {
+						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
 					}
 
 					file, err := os.Open(tempPath)
 					if err != nil {
+						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
 					}
 
 					if err := makeSquareImage(file, outputPath); err != nil {
+						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
 					}
@@ -236,60 +326,25 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 			}
 
 			mu.Lock()
-			localMedia[productID] = localURLs
+			statusChan <- types.ProcessStatus{ProductID: id, Status: "ok", Timestamp: time.Now()}
+			photoLoadCh <- mydb.Article{ID: id, Photos: localURLs}
 			mu.Unlock()
+
+			log.Printf("Created DB record for productID: %s", productID)
 		}(productID, urls)
+
 	}
 
 	wg.Wait()
+	close(photoLoadCh)
+	close(semaphore)
 	ctx.Done()
-	close(errCh)
 
 	if len(errCh) > 0 {
-		return nil, <-errCh
+		return <-errCh
 	}
 
-	return localMedia, nil
-}
-
-func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
-
-	log.Printf("Signal received")
-
-	ctx, cancel := context.WithTimeout(r.Context(), 500*time.Minute)
-	ctx = context.WithValue(ctx, "db", s.db)
-	ids, err := s.db.GetArticles()
-	if err != nil {
-		log.Fatalf("Cant get exist articles from db !")
-	}
-
-	ctx = context.WithValue(ctx, "exist_ids", ids)
-	defer cancel()
-
-	var req MediaRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	log.Printf("Fetch data from remote API...")
-	remoteMedia, err := fetchRemoteMedia(req.ProductIDs)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error fetching remote media: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	log.Printf("Processing media...")
-	localMedia, err := processMedia(ctx, remoteMedia)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error processing media: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(localMedia); err != nil {
-		http.Error(w, "Error encoding response", http.StatusInternalServerError)
-	}
+	return nil
 }
 
 func (s *Server) handleDirectLinks(w http.ResponseWriter, r *http.Request) {
@@ -371,8 +426,38 @@ func (s *Server) handleImageRequest(w http.ResponseWriter, r *http.Request) {
 
 	http.ServeFile(w, r, imagePath)
 }
+func (s *Server) handleImageStatusRequest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProductIDs []int `json:"productIDs"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	var statuses []types.ProcessStatus
+	var err error
+
+	if len(req.ProductIDs) == 0 {
+		statuses, err = s.db.GetAllImageStatuses()
+	} else {
+		statuses, err = s.db.GetImageStatusesByProductIDs(req.ProductIDs)
+	}
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Error fetching image statuses: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(statuses); err != nil {
+		http.Error(w, "Error encoding response", http.StatusInternalServerError)
+	}
+}
 
 func main() {
+	runtime.GOMAXPROCS(5)
 	if err := os.MkdirAll(storageDir, os.ModePerm); err != nil {
 		log.Fatalf("Failed to create storage directory: %v", err)
 	}
