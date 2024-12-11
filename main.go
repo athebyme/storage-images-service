@@ -42,35 +42,29 @@ const (
 	storageDir = "./storage"
 )
 
-// makeSquareImage transforms an image to a square by adding white padding.
 func makeSquareImage(input io.Reader, outputPath string) error {
 	img, _, err := image.Decode(input)
 	if err != nil {
 		return err
 	}
 
-	// Get original dimensions
 	originalBounds := img.Bounds()
 	width := originalBounds.Dx()
 	height := originalBounds.Dy()
 
-	// Determine canvas size
 	size := width
 	if height > width {
 		size = height
 	}
 
-	// Create a new square image with white background
 	squareImage := image.NewRGBA(image.Rect(0, 0, size, size))
 	white := color.RGBA{255, 255, 255, 255}
 	draw.Draw(squareImage, squareImage.Bounds(), &image.Uniform{white}, image.Point{}, draw.Src)
 
-	// Center the original image
 	offsetX := (size - width) / 2
 	offsetY := (size - height) / 2
 	draw.Draw(squareImage, image.Rect(offsetX, offsetY, offsetX+width, offsetY+height), img, originalBounds.Min, draw.Over)
 
-	// Save the output image
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
 		return err
@@ -80,7 +74,6 @@ func makeSquareImage(input io.Reader, outputPath string) error {
 	return jpeg.Encode(outputFile, squareImage, nil)
 }
 
-// downloadImage downloads an image from a URL and saves it to a file.
 func downloadImage(ctx context.Context, url, outputPath string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -108,7 +101,6 @@ func downloadImage(ctx context.Context, url, outputPath string) error {
 	return err
 }
 
-// fetchRemoteMedia fetches media data from the remote API.
 func fetchRemoteMedia(productIDs []int) (MediaResponse, error) {
 	requestBody, err := json.Marshal(MediaRequest{ProductIDs: productIDs})
 	if err != nil {
@@ -133,7 +125,6 @@ func fetchRemoteMedia(productIDs []int) (MediaResponse, error) {
 	return mediaResponse, nil
 }
 
-// processMedia downloads, converts, and stores images with rate limiting.
 func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, error) {
 	localMedia := make(MediaResponse)
 	idsSync := sync.Map{}
@@ -148,8 +139,8 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 		}
 	}
 
-	semaphore := make(chan struct{}, 30)         // Limit to 30 concurrent downloads
-	limiter := time.NewTicker(time.Minute / 200) // Limit to 300 downloads per minute
+	semaphore := make(chan struct{}, 30)
+	limiter := time.NewTicker(time.Minute / 200)
 	defer limiter.Stop()
 
 	errCh := make(chan error, len(media))
@@ -198,17 +189,14 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 				default:
 				}
 
-				// Rate limiting
 				<-limiter.C
 
-				// Acquire semaphore
 				semaphore <- struct{}{}
 				func() {
 					defer func() {
 						<-semaphore
-					}() // Release semaphore
+					}()
 
-					// Prepare paths
 					outputDir := filepath.Join(storageDir, productID)
 					if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
 						errCh <- err
@@ -216,14 +204,12 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 					}
 					outputPath := filepath.Join(outputDir, fmt.Sprintf("%d.jpg", i))
 
-					// Download image
 					tempPath := outputPath + ".tmp"
 					if err := downloadImage(ctx, url, tempPath); err != nil {
 						errCh <- err
 						return
 					}
 
-					// Convert image
 					file, err := os.Open(tempPath)
 					if err != nil {
 						errCh <- err
@@ -235,7 +221,6 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 						return
 					}
 
-					// remove temp file
 					defer func() {
 						err = file.Close()
 						if err != nil {
@@ -247,7 +232,6 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 						}
 					}()
 
-					// Add to local URLs
 					localURLs[i] = fmt.Sprintf("%s/%s/%d.jpg", localHost, productID, i)
 				}()
 			}
@@ -288,7 +272,6 @@ func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch data from remote API
 	log.Printf("Fetch data from remote API...")
 	remoteMedia, err := fetchRemoteMedia(req.ProductIDs)
 	if err != nil {
@@ -296,7 +279,6 @@ func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Process media
 	log.Printf("Processing media...")
 	localMedia, err := processMedia(ctx, remoteMedia)
 	if err != nil {
@@ -304,7 +286,6 @@ func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return local media response
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(localMedia); err != nil {
 		http.Error(w, "Error encoding response", http.StatusInternalServerError)
@@ -312,14 +293,12 @@ func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDirectLinks(w http.ResponseWriter, r *http.Request) {
-	// Чтение тела запроса
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Не удалось прочитать тело запроса", http.StatusBadRequest)
 		return
 	}
 
-	// Декодирование JSON в структуру
 	var request MediaRequest
 	err = json.Unmarshal(body, &request)
 	if err != nil {
@@ -327,52 +306,38 @@ func (s *Server) handleDirectLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Директория с товарами
 	storageDir := "./storage"
 
-	// Список ссылок на изображения
 	var imageLinks []string
 
-	// Перебор всех переданных productID
 	for _, productID := range request.ProductIDs {
-		// Путь к папке с изображениями товара
 		productDir := filepath.Join(storageDir, fmt.Sprintf("%d", productID))
 
-		// Проверяем, существует ли папка
 		if _, err := ioutil.ReadDir(productDir); err != nil {
-			// Если папка не найдена, пропускаем товар
 			continue
 		}
 
-		// Получаем все файлы в папке товара
 		files, err := ioutil.ReadDir(productDir)
 		if err != nil {
 			http.Error(w, "Ошибка при чтении папки с изображениями", http.StatusInternalServerError)
 			return
 		}
 
-		// Для каждого файла в папке генерируем ссылку
 		for _, file := range files {
-			// Сгенерировать ссылку на файл
 			imageLink := fmt.Sprintf("%s/%d/%s", localHost, productID, file.Name())
 			imageLinks = append(imageLinks, imageLink)
 		}
 	}
 
-	// Если ссылки на изображения найдены, отправляем их
 	if len(imageLinks) > 0 {
-		// Отправляем список ссылок в формате JSON
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(imageLinks)
 	} else {
-		// Если изображения не найдены, возвращаем ошибку
 		http.Error(w, "Изображения не найдены", http.StatusNotFound)
 	}
 }
 
 func (s *Server) handleImageRequest(w http.ResponseWriter, r *http.Request) {
-	// Получаем productID и имя файла из URL
-	// Пример: /4285/0.jpg -> productID = 4285, fileName = 0.jpg
 	pathParts := strings.Split(r.URL.Path, "/")
 	if len(pathParts) < 3 {
 		http.Error(w, "Неверный путь запроса", http.StatusBadRequest)
@@ -382,19 +347,15 @@ func (s *Server) handleImageRequest(w http.ResponseWriter, r *http.Request) {
 	productID := pathParts[1]
 	fileName := pathParts[2]
 
-	// Путь к папке с изображениями товара
 	imageDir := "./storage/" + productID
 
-	// Формируем полный путь к файлу изображения
 	imagePath := filepath.Join(imageDir, fileName)
 
-	// Проверяем, существует ли файл
 	if _, err := os.Stat(imagePath); os.IsNotExist(err) {
 		http.Error(w, "Изображение не найдено", http.StatusNotFound)
 		return
 	}
 
-	// Устанавливаем тип контента в зависимости от расширения файла
 	ext := filepath.Ext(imagePath)
 	switch ext {
 	case ".jpg", ".jpeg":
@@ -408,12 +369,10 @@ func (s *Server) handleImageRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Отдаем изображение клиенту
 	http.ServeFile(w, r, imagePath)
 }
 
 func main() {
-	// Ensure the storage directory exists
 	if err := os.MkdirAll(storageDir, os.ModePerm); err != nil {
 		log.Fatalf("Failed to create storage directory: %v", err)
 	}
@@ -436,12 +395,10 @@ func main() {
 
 	server := NewServer(db)
 
-	// Register HTTP handlers
 	http.HandleFunc("/api/media/update", server.handleMediaRequest)
 	http.HandleFunc("/api/media", server.handleDirectLinks)
 	http.HandleFunc("/", server.handleImageRequest)
 
-	// Start the server
 	port := 8080
 	log.Printf("Server is running on port %d", port)
 	if err := http.ListenAndServe(":"+strconv.Itoa(port), nil); err != nil {
