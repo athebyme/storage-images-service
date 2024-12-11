@@ -139,7 +139,7 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 		}
 	}
 
-	semaphore := make(chan struct{}, 30)
+	semaphore := make(chan struct{}, 100)
 	limiter := time.NewTicker(time.Minute / 200)
 	defer limiter.Stop()
 
@@ -183,7 +183,7 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 
 				select {
 				case <-ctx.Done():
-					log.Printf("ctx.Done()")
+					log.Printf("Ctx end ! ")
 					errCh <- ctx.Err()
 					return
 				default:
@@ -243,6 +243,7 @@ func processMedia(ctx context.Context, media MediaResponse) (MediaResponse, erro
 	}
 
 	wg.Wait()
+	ctx.Done()
 	close(errCh)
 
 	if len(errCh) > 0 {
