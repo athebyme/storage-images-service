@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS storage.images;
+DROP SCHEMA IF EXISTS storage;

@@ -1,0 +1,10 @@
+host:
+  localhost
+usr:
+  athebyme
+passwd:
+  EgHuG808k1
+db:
+  storage
+port:
+  5432
