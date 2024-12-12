@@ -207,42 +207,47 @@ func (p *PostgresDriver) CreateRecord(record Article) error {
 
 	return nil
 }
-
 func (p *PostgresDriver) CreateRecords(records []Article) error {
-	// Подготовка данных для одной записи
-	type Record struct {
-		ProductID int      `json:"product_id"`
-		URLs      []string `json:"urls"`
-	}
-
-	var combinedRecord []Record
-	for _, record := range records {
-		combinedRecord = append(combinedRecord, Record{
-			ProductID: record.ID,
-			URLs:      record.Photos,
-		})
-	}
-
-	// Преобразуем запись в JSON
-	combinedRecordJSON, err := json.Marshal(combinedRecord)
-	if err != nil {
-		return fmt.Errorf("failed to serialize combined record: %w", err)
-	}
-
-	// SQL-запрос для вставки записи
+	// SQL-запрос для вставки
 	query := `
         INSERT INTO storage.images (product_id, urls)
-        VALUES ($1::json)
+        VALUES ($1, $2::jsonb)
         ON CONFLICT (product_id) DO NOTHING;
     `
 
-	// Выполняем запрос
 	p.Lock()
-	_, err = p.db.Exec(query, combinedRecordJSON)
+	defer p.Unlock()
+
+	tx, err := p.db.Begin()
 	if err != nil {
-		return fmt.Errorf("failed to insert or update combined record: %w", err)
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	p.Unlock()
+
+	stmt, err := tx.Prepare(query)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to prepare query: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, record := range records {
+		// Преобразование массива URLs в JSON
+		urlsJSON, err := json.Marshal(record.Photos)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to serialize URLs for product_id %d: %w", record.ID, err)
+		}
+
+		_, err = stmt.Exec(record.ID, string(urlsJSON))
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("failed to insert record for product_id %d: %w", record.ID, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
 
 	return nil
 }

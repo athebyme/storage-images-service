@@ -163,17 +163,19 @@ func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Обработка статусов после завершения обработки медиа
+		go func() {
+			for status := range statusChan {
+				if err := s.db.UpdateImageStatus(status); err != nil {
+					log.Printf("Failed to update image status: %v", err)
+				}
+			}
+		}()
+
 		log.Printf("Processing media...")
 		if err = processMedia(ctx, remoteMedia, statusChan); err != nil {
 			log.Printf("Error processing media: %v", err)
 			return
-		}
-
-		// Обработка статусов после завершения обработки медиа
-		for status := range statusChan {
-			if err := s.db.UpdateImageStatus(status); err != nil {
-				log.Printf("Failed to update image status: %v", err)
-			}
 		}
 
 		log.Printf("Media processing completed successfully")
@@ -182,10 +184,11 @@ func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
 
 func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- types.ProcessStatus) error {
 	defer close(statusChan)
-	idsSync := sync.Map{}
 
+	idsSync := sync.Map{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	var batchWG sync.WaitGroup
 
 	ids, ok := ctx.Value("exist_ids").(map[int]struct{})
 	if ok {
@@ -208,33 +211,30 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 
 	batch := make(chan []mydb.Article, 1)
 
-	wg.Add(1)
+	batchWG.Add(1)
 	go func() {
+		defer batchWG.Done()
 		var loadBatch []mydb.Article
-		defer func() {
-			if len(loadBatch) > 0 {
-				batch <- loadBatch
-				loadBatch = []mydb.Article{}
-			}
-			close(batch)
-			wg.Done()
-		}()
+		defer close(batch)
+
 		for article := range photoLoadCh {
 			loadBatch = append(loadBatch, article)
 			log.Printf("Article %d is done", article.ID)
+
 			if len(loadBatch) == 100 {
 				batch <- loadBatch
 				loadBatch = []mydb.Article{}
 			}
 		}
+
+		if len(loadBatch) > 0 {
+			batch <- loadBatch
+		}
 	}()
 
-	wg.Add(1)
+	batchWG.Add(1)
 	go func() {
-		defer func() {
-			wg.Done()
-			close(errCh)
-		}()
+		defer batchWG.Done()
 		for locBatch := range batch {
 			err := driver.CreateRecords(locBatch)
 			if err != nil {
@@ -246,13 +246,12 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 		}
 	}()
 
-	wg.Add(len(media))
-
 	for productID, urls := range media {
+		wg.Add(1)
 		go func(productID string, urls []string) {
-			localURLs := make([]string, len(urls))
 			defer wg.Done()
 
+			localURLs := make([]string, len(urls))
 			id, err := strconv.Atoi(productID)
 			if err != nil {
 				log.Printf("Failed to convert productID to int: %v", err)
@@ -269,7 +268,7 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 			for i, url := range urls {
 				select {
 				case <-ctx.Done():
-					log.Printf("Ctx end!")
+					log.Printf("Context done!")
 					statusChan <- types.ProcessStatus{ProductID: id, Status: "cancelled", Timestamp: time.Now()}
 					errCh <- ctx.Err()
 					return
@@ -311,14 +310,8 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 					}
 
 					defer func() {
-						err = file.Close()
-						if err != nil {
-							errCh <- err
-						}
-						err = os.Remove(tempPath)
-						if err != nil {
-							errCh <- err
-						}
+						_ = file.Close()
+						_ = os.Remove(tempPath)
 					}()
 
 					localURLs[i] = fmt.Sprintf("%s/%s/%d.jpg", localHost, productID, i)
@@ -330,13 +323,14 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 			photoLoadCh <- mydb.Article{ID: id, Photos: localURLs}
 			mu.Unlock()
 
-			log.Printf("Created DB record for productID: %s", productID)
 		}(productID, urls)
-
 	}
 
 	wg.Wait()
 	close(photoLoadCh)
+
+	batchWG.Wait()
+
 	close(semaphore)
 	ctx.Done()
 
