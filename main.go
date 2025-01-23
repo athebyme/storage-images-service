@@ -39,7 +39,7 @@ type MediaRequest struct {
 type MediaResponse map[string][]string
 
 const (
-	remoteAPI  = "https://api.athebyme-market.ru/api/media"
+	remoteAPI  = "http://147.45.79.183:8081/api/media"
 	localHost  = "http://media.athebyme-market.ru"
 	storageDir = "./storage"
 )
@@ -286,6 +286,7 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 
 					outputDir := filepath.Join(storageDir, productID)
 					if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
+						log.Printf("Error with storagedir %d", id)
 						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
@@ -294,6 +295,7 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 
 					tempPath := outputPath + ".tmp"
 					if err := downloadImage(ctx, url, tempPath); err != nil {
+						log.Printf("Error downloading %d", id)
 						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
@@ -301,12 +303,14 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 
 					file, err := os.Open(tempPath)
 					if err != nil {
+						log.Printf("Error opening temp img %d", id)
 						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
 					}
 
 					if err := makeSquareImage(file, outputPath); err != nil {
+						log.Printf("Error squaring %d", id)
 						statusChan <- types.ProcessStatus{ProductID: id, Status: "error", Timestamp: time.Now()}
 						errCh <- err
 						return
@@ -316,7 +320,6 @@ func processMedia(ctx context.Context, media MediaResponse, statusChan chan<- ty
 						_ = file.Close()
 						_ = os.Remove(tempPath)
 					}()
-
 					localURLs[i] = fmt.Sprintf("%s/%s/%d.jpg", localHost, productID, i)
 				}()
 			}
