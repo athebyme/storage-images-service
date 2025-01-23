@@ -166,6 +166,9 @@ func (s *Server) handleMediaRequest(w http.ResponseWriter, r *http.Request) {
 		// Обработка статусов после завершения обработки медиа
 		go func() {
 			for status := range statusChan {
+				if status.Status == "error" {
+					log.Printf("API error: %s | ID: %d", status.Status, status.ProductID)
+				}
 				if err := s.db.UpdateImageStatus(status); err != nil {
 					log.Printf("Failed to update image status: %v", err)
 				}
