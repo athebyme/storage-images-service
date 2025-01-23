@@ -481,7 +481,7 @@ func main() {
 	http.HandleFunc("/api/media", server.handleDirectLinks)
 	http.HandleFunc("/", server.handleImageRequest)
 
-	port := 8080
+	port := 8081
 	log.Printf("Server is running on port %d", port)
 	if err := http.ListenAndServe(":"+strconv.Itoa(port), nil); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
