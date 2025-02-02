@@ -2,6 +2,7 @@ package main
 
 import (
 	mydb "awesomeProject1/database"
+	"awesomeProject1/middleware"
 	"awesomeProject1/types"
 	"bytes"
 	"context"
@@ -450,6 +451,48 @@ func (s *Server) handleImageStatusRequest(w http.ResponseWriter, r *http.Request
 	}
 }
 
+const (
+	anonymousPackagePath    = "./storage/!additional/"
+	anonymousPackageImgFile = "package-png.png"
+)
+
+func (s *Server) handleAnonymousPackageImage(w http.ResponseWriter, r *http.Request) {
+	ext := r.URL.Query().Get("ext")
+	if ext == "" {
+		ext = "png"
+	}
+
+	var filename string
+	var contentType string
+
+	switch ext {
+	case "png":
+		filename = "package-png.png"
+		contentType = "image/png"
+	case "jpg", "jpeg":
+		filename = "package-jpg.jpg"
+		contentType = "image/jpeg"
+	default:
+		http.Error(w, "Неверный формат изображения", http.StatusBadRequest)
+		return
+	}
+
+	filePath := filepath.Join(anonymousPackagePath, filename)
+	file, err := os.Open(filePath)
+	if err != nil {
+		http.Error(w, "Изображение не найдено", http.StatusNotFound)
+		return
+	}
+	defer file.Close()
+
+	w.Header().Set("Content-Type", contentType)
+
+	if _, err := io.Copy(w, file); err != nil {
+		http.Error(w, "Ошибка при отправке изображения", http.StatusInternalServerError)
+		return
+	}
+}
+
 func main() {
 	runtime.GOMAXPROCS(5)
 	if err := os.MkdirAll(storageDir, os.ModePerm); err != nil {
@@ -474,9 +517,13 @@ func main() {
 
 	server := NewServer(db)
 
-	http.HandleFunc("/api/media/update", server.handleMediaRequest)
-	http.HandleFunc("/api/media", server.handleDirectLinks)
-	http.HandleFunc("/", server.handleImageRequest)
+	mux := http.NewServeMux()
+
+	mux.Handle("/api/media/update", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleMediaRequest)))
+	mux.Handle("/api/media", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleDirectLinks)))
+	mux.Handle("/", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleImageRequest)))
+	mux.Handle("/api/media/status", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleImageStatusRequest)))
+	mux.Handle("/anonymous/package/image/png", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleAnonymousPackageImage)))
 
 	port := 8080
 	log.Printf("Server is running on port %d", port)
