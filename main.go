@@ -534,7 +534,7 @@ func main() {
 
 	port := 8081
 	log.Printf("Server is running on port %d", port)
-	if err := http.ListenAndServe(":"+strconv.Itoa(port), nil); err != nil {
+	if err := http.ListenAndServe(":"+strconv.Itoa(port), mux); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }
