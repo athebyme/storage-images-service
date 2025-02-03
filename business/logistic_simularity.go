@@ -2,102 +2,98 @@ package business
 
 import (
 	"encoding/json"
-	"gonum.org/v1/gonum/blas/blas64"
+	"github.com/texttheater/golang-levenshtein/levenshtein"
+	"github.com/xrash/smetrics"
 	"io"
 	"net/http"
 	"strings"
 )
 
-func cosineSimilarity(a, b []float64) float64 {
-	dotProduct := blas64.Dot(blas64.Vector{Data: a}, blas64.Vector{Data: b})
+func similarity(a, b string) float64 {
+	a = strings.TrimSpace(strings.ToLower(a))
+	b = strings.TrimSpace(strings.ToLower(b))
 
-	magnitudeA := 0.0
-	for _, val := range a {
-		magnitudeA += val * val
-	}
+	jaroWinkler := smetrics.JaroWinkler(a, b, 0.7, 4)
 
-	magnitudeB := 0.0
-	for _, val := range b {
-		magnitudeB += val * val
+	levDist := levenshtein.DistanceForStrings([]rune(a), []rune(b), levenshtein.DefaultOptions)
+	maxLen := max(len(a), len(b))
+	if maxLen == 0 {
+		maxLen = 1
 	}
+	levSimilarity := 1 - float64(levDist)/float64(maxLen)
 
-	if magnitudeA == 0 || magnitudeB == 0 {
-		return 0
-	}
-	return dotProduct / (sqrt(magnitudeA) * sqrt(magnitudeB))
+	ngramSimilarity := ngramSimilarity(a, b, 2)
+
+	combinedSimilarity := 0.4*jaroWinkler + 0.3*levSimilarity + 0.3*ngramSimilarity
+
+	return combinedSimilarity
 }
 
-func sqrt(value float64) float64 {
-	return value * value
+func ngramSimilarity(a, b string, n int) float64 {
+	aGrams := generateNGrams(a, n)
+	bGrams := generateNGrams(b, n)
+
+	intersection := 0
+	for gram := range aGrams {
+		if bGrams[gram] {
+			intersection++
+		}
+	}
+
+	union := len(aGrams) + len(bGrams) - intersection
+	if union == 0 {
+		return 0.0
+	}
+
+	return float64(intersection) / float64(union)
 }
 
-func tokenize(text string) []string {
-	text = strings.ToLower(text)
-	text = strings.ReplaceAll(text, ".", "")
-	text = strings.ReplaceAll(text, ",", "")
-	text = strings.ReplaceAll(text, "!", "")
-	text = strings.ReplaceAll(text, "?", "")
-	text = strings.ReplaceAll(text, "(", "")
-	text = strings.ReplaceAll(text, ")", "")
+func generateNGrams(s string, n int) map[string]bool {
+	grams := make(map[string]bool)
+	for i := 0; i <= len(s)-n; i++ {
+		grams[s[i:i+n]] = true
+	}
+	return grams
+}
 
-	return strings.Fields(text)
+type RequestBody struct {
+	S1 string `json:"s1"`
+	S2 string `json:"s2"`
 }
 
 func SimilarityHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST method is supported", http.StatusMethodNotAllowed)
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024) // 10 MB limit
-
-	var payload struct {
-		String1 string `json:"s1"`
-		String2 string `json:"s2"`
-	}
-
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "Error reading request body", http.StatusBadRequest)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
+	defer r.Body.Close()
 
-	err = json.Unmarshal(body, &payload)
+	var reqBody RequestBody
+	err = json.Unmarshal(body, &reqBody)
 	if err != nil {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		http.Error(w, "Invalid JSON format", http.StatusBadRequest)
 		return
 	}
 
-	if payload.String1 == "" || payload.String2 == "" {
+	if reqBody.S1 == "" || reqBody.S2 == "" {
 		http.Error(w, "Both s1 and s2 are required", http.StatusBadRequest)
 		return
 	}
 
-	if len(payload.String1) > 5000 || len(payload.String2) > 5000 {
-		http.Error(w, "Strings must not exceed 5000 characters", http.StatusBadRequest)
-		return
-	}
-
-	tokens1 := tokenize(payload.String1)
-	tokens2 := tokenize(payload.String2)
-
-	vector1 := make([]float64, len(tokens1))
-	vector2 := make([]float64, len(tokens2))
-
-	for i, token := range tokens1 {
-		vector1[i] = float64(len(token))
-	}
-	for i, token := range tokens2 {
-		vector2[i] = float64(len(token))
-	}
-
-	similarityScore := cosineSimilarity(vector1, vector2)
+	sim := similarity(reqBody.S1, reqBody.S2)
 
 	w.Header().Set("Content-Type", "application/json")
-	err = json.NewEncoder(w).Encode(map[string]float64{
-		"similarity": similarityScore,
-	})
+	w.WriteHeader(http.StatusOK)
+	err = json.NewEncoder(w).Encode(map[string]float64{"similarity": sim})
 	if err != nil {
 		return
 	}
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
