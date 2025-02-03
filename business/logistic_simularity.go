@@ -2,13 +2,45 @@ package business
 
 import (
 	"encoding/json"
-	"github.com/xrash/smetrics"
+	"gonum.org/v1/gonum/blas/blas64"
 	"io"
 	"net/http"
+	"strings"
 )
 
-func similarity(a, b string) float64 {
-	return smetrics.Jaro(a, b)
+func cosineSimilarity(a, b []float64) float64 {
+	dotProduct := blas64.Dot(blas64.Vector{Data: a}, blas64.Vector{Data: b})
+
+	magnitudeA := 0.0
+	for _, val := range a {
+		magnitudeA += val * val
+	}
+
+	magnitudeB := 0.0
+	for _, val := range b {
+		magnitudeB += val * val
+	}
+
+	if magnitudeA == 0 || magnitudeB == 0 {
+		return 0
+	}
+	return dotProduct / (sqrt(magnitudeA) * sqrt(magnitudeB))
+}
+
+func sqrt(value float64) float64 {
+	return value * value
+}
+
+func tokenize(text string) []string {
+	text = strings.ToLower(text)
+	text = strings.ReplaceAll(text, ".", "")
+	text = strings.ReplaceAll(text, ",", "")
+	text = strings.ReplaceAll(text, "!", "")
+	text = strings.ReplaceAll(text, "?", "")
+	text = strings.ReplaceAll(text, "(", "")
+	text = strings.ReplaceAll(text, ")", "")
+
+	return strings.Fields(text)
 }
 
 func SimilarityHandler(w http.ResponseWriter, r *http.Request) {
@@ -46,10 +78,26 @@ func SimilarityHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sim := similarity(payload.String1, payload.String2)
+	tokens1 := tokenize(payload.String1)
+	tokens2 := tokenize(payload.String2)
+
+	vector1 := make([]float64, len(tokens1))
+	vector2 := make([]float64, len(tokens2))
+
+	for i, token := range tokens1 {
+		vector1[i] = float64(len(token))
+	}
+	for i, token := range tokens2 {
+		vector2[i] = float64(len(token))
+	}
+
+	similarityScore := cosineSimilarity(vector1, vector2)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]float64{
-		"similarity": sim,
+	err = json.NewEncoder(w).Encode(map[string]float64{
+		"similarity": similarityScore,
 	})
+	if err != nil {
+		return
+	}
 }
