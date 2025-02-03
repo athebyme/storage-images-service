@@ -458,8 +458,7 @@ func (s *Server) handleImageStatusRequest(w http.ResponseWriter, r *http.Request
 }
 
 const (
-	anonymousPackagePath    = "./storage/!additional/"
-	anonymousPackageImgFile = "package-png.png"
+	anonymousPackagePath = "./storage/!additional/"
 )
 
 func (s *Server) handleAnonymousPackageImage(w http.ResponseWriter, r *http.Request) {
@@ -530,6 +529,7 @@ func main() {
 	mux.Handle("/", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleImageRequest)))
 	mux.Handle("/api/media/status", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleImageStatusRequest)))
 	mux.Handle("/anonymous/package/image/png", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleAnonymousPackageImage)))
+	mux.Handle("/similarity/strings", middleware.PrometheusMiddleware(http.HandlerFunc(similarityHandler)))
 
 	port := 8081
 	log.Printf("Server is running on port %d", port)
