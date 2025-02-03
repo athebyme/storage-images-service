@@ -3,6 +3,7 @@ package main
 import (
 	"awesomeProject1/business"
 	mydb "awesomeProject1/database"
+	"awesomeProject1/metrics"
 	"awesomeProject1/middleware"
 	"awesomeProject1/types"
 	"bytes"
@@ -522,7 +523,7 @@ func main() {
 	}
 
 	server := NewServer(db)
-
+	startMetrics()
 	mux := http.NewServeMux()
 
 	mux.Handle("/api/media/update", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleMediaRequest)))
@@ -537,4 +538,15 @@ func main() {
 	if err := http.ListenAndServe(":"+strconv.Itoa(port), mux); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+func startMetrics() {
+	port := 2112
+	http.Handle("/metrics", metrics.MetricsHandler())
+	go func() {
+		log.Printf("Starting metrics server on : %d", port)
+		if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
+			log.Fatalf("Failed to start metrics server: %v", err)
+		}
+	}()
 }
