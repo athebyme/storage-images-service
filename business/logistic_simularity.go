@@ -1,4 +1,4 @@
-package main
+package business
 
 import (
 	"fmt"
@@ -10,7 +10,7 @@ func similarity(a, b string) float64 {
 	return smetrics.Jaro(a, b)
 }
 
-func similarityHandler(w http.ResponseWriter, r *http.Request) {
+func SimilarityHandler(w http.ResponseWriter, r *http.Request) {
 	str1 := r.URL.Query().Get("s1")
 	str2 := r.URL.Query().Get("s2")
 

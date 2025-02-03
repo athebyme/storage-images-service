@@ -1,6 +1,7 @@
 package main
 
 import (
+	"awesomeProject1/business"
 	mydb "awesomeProject1/database"
 	"awesomeProject1/middleware"
 	"awesomeProject1/types"
@@ -529,7 +530,7 @@ func main() {
 	mux.Handle("/", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleImageRequest)))
 	mux.Handle("/api/media/status", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleImageStatusRequest)))
 	mux.Handle("/anonymous/package/image/png", middleware.PrometheusMiddleware(http.HandlerFunc(server.handleAnonymousPackageImage)))
-	mux.Handle("/similarity/strings", middleware.PrometheusMiddleware(http.HandlerFunc(similarityHandler)))
+	mux.Handle("/similarity/strings", middleware.PrometheusMiddleware(http.HandlerFunc(business.SimilarityHandler)))
 
 	port := 8081
 	log.Printf("Server is running on port %d", port)
