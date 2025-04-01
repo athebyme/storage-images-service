@@ -6,6 +6,11 @@ import (
 	"net/http"
 )
 
+// Константа для пароля API
+const (
+	API_UPDATE_PASSWORD = "secureUpdatePassword123" // Замените на свой сложный пароль
+)
+
 // setupRoutes настраивает все маршруты API
 func setupRoutes(server *Server) http.Handler {
 	mux := http.NewServeMux()
@@ -18,11 +23,6 @@ func setupRoutes(server *Server) http.Handler {
 	// POST /api/v1/media - получение ссылок на изображения через тело запроса
 	apiV1.Handle("/media", middleware.PrometheusMiddleware(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				w.Header().Set("Allow", "POST")
-				http.Error(w, "Метод не разрешен", http.StatusMethodNotAllowed)
-				return
-			}
 			server.handleDirectLinks(w, r)
 		}),
 	))

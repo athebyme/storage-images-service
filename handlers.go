@@ -6,7 +6,6 @@ import (
 	"awesomeProject1/types"
 	"bytes"
 	"context"
-	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -443,118 +442,6 @@ func (s *Server) handleImageRequest(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, fileName, fileInfo.ModTime(), file)
 }
 
-// handleMediaProcessing обрабатывает запросы на обработку медиафайлов (асинхронная операция)
-func (s *Server) handleMediaProcessing(w http.ResponseWriter, r *http.Request) {
-	var req MediaRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Неверный формат запроса", http.StatusBadRequest)
-		return
-	}
-
-	if len(req.ProductIDs) == 0 {
-		http.Error(w, "Список productIDs не может быть пустым", http.StatusBadRequest)
-		return
-	}
-
-	// Начинаем асинхронную обработку
-	go func() {
-		ctx := context.Background()
-		ctx = context.WithValue(ctx, "db", s.db)
-
-		// Получаем существующие ID из базы данных
-		ids, err := s.db.GetArticles()
-		if err != nil {
-			log.Printf("Ошибка при получении существующих статей: %v", err)
-			return
-		}
-		ctx = context.WithValue(ctx, "exist_ids", ids)
-
-		// Получаем данные из удаленного API
-		remoteMedia, err := fetchRemoteMedia(req.ProductIDs)
-		if err != nil {
-			log.Printf("Ошибка при получении медиа из удаленного API: %v", err)
-			return
-		}
-
-		// Создаем канал для обработки статусов
-		statusChan := make(chan types.ProcessStatus, len(req.ProductIDs))
-
-		// Запускаем обработку статусов
-		go func() {
-			for status := range statusChan {
-				if err := s.db.UpdateImageStatus(status); err != nil {
-					log.Printf("Ошибка при обновлении статуса: %v", err)
-				}
-			}
-		}()
-
-		// Обрабатываем медиафайлы
-		if err := processMedia(ctx, remoteMedia, statusChan); err != nil {
-			log.Printf("Ошибка при обработке медиа: %v", err)
-		}
-
-		// После завершения обработки очищаем кэш для обновления статистики
-		imageCache.Clear()
-	}()
-
-	// Возвращаем статус 202 Accepted для асинхронных операций
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": "processing",
-		"statusUrl": fmt.Sprintf("/api/v1/media/status?ids=%s",
-			strings.Trim(strings.Join(strings.Fields(fmt.Sprint(req.ProductIDs)), ","), "[]")),
-		"message": "Обработка изображений запущена",
-	})
-}
-
-// handleImageStatusRequest возвращает статус обработки изображений
-func (s *Server) handleImageStatusRequest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		http.Error(w, "Метод не разрешен", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Получаем параметры из URL
-	idsParam := r.URL.Query().Get("ids")
-	var productIDs []int
-
-	if idsParam != "" {
-		idStrs := strings.Split(idsParam, ",")
-		for _, idStr := range idStrs {
-			id, err := strconv.Atoi(strings.TrimSpace(idStr))
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Неверный формат ID: %s", idStr), http.StatusBadRequest)
-				return
-			}
-			productIDs = append(productIDs, id)
-		}
-	}
-
-	// Получаем статусы из БД
-	var statuses []types.ProcessStatus
-	var err error
-
-	if len(productIDs) == 0 {
-		statuses, err = s.db.GetAllImageStatuses()
-	} else {
-		statuses, err = s.db.GetImageStatusesByProductIDs(productIDs)
-	}
-
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Ошибка при получении статусов: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Отправляем ответ
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-cache")
-	if err := json.NewEncoder(w).Encode(statuses); err != nil {
-		http.Error(w, "Ошибка при кодировании ответа", http.StatusInternalServerError)
-	}
-}
-
 // handleAnonymousPackageImage обрабатывает запросы на анонимные пакетные изображения
 func (s *Server) handleAnonymousPackageImage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -640,63 +527,124 @@ func (s *Server) handleSimilarity(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]float64{"similarity": sim})
 }
 
-// Вспомогательные функции
-
-// isImageFile проверяет, является ли файл изображением по расширению
-func isImageFile(filename string) bool {
-	ext := strings.ToLower(filepath.Ext(filename))
-	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp"
-}
-
-// getContentType определяет MIME-тип файла по расширению
-func getContentType(filename string) string {
-	ext := strings.ToLower(filepath.Ext(filename))
-	switch ext {
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".png":
-		return "image/png"
-	case ".gif":
-		return "image/gif"
-	case ".webp":
-		return "image/webp"
-	default:
-		return "application/octet-stream"
+// handleImageStatusRequest возвращает статус обработки изображений
+func (s *Server) handleImageStatusRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "Метод не разрешен", http.StatusMethodNotAllowed)
+		return
 	}
-}
 
-// calculateEtag вычисляет ETag для файла
-func calculateEtag(filePath string) (string, error) {
-	file, err := os.Open(filePath)
+	// Получаем параметры из URL
+	idsParam := r.URL.Query().Get("ids")
+	var productIDs []int
+
+	if idsParam != "" {
+		idStrs := strings.Split(idsParam, ",")
+		for _, idStr := range idStrs {
+			id, err := strconv.Atoi(strings.TrimSpace(idStr))
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Неверный формат ID: %s", idStr), http.StatusBadRequest)
+				return
+			}
+			productIDs = append(productIDs, id)
+		}
+	}
+
+	// Получаем статусы из БД
+	var statuses []types.ProcessStatus
+	var err error
+
+	if len(productIDs) == 0 {
+		statuses, err = s.db.GetAllImageStatuses()
+	} else {
+		statuses, err = s.db.GetImageStatusesByProductIDs(productIDs)
+	}
+
 	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	h := md5.New()
-	if _, err := io.Copy(h, file); err != nil {
-		return "", err
+		http.Error(w, fmt.Sprintf("Ошибка при получении статусов: %v", err), http.StatusInternalServerError)
+		return
 	}
 
-	return fmt.Sprintf("\"%x\"", h.Sum(nil)), nil
+	// Отправляем ответ
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	if err := json.NewEncoder(w).Encode(statuses); err != nil {
+		http.Error(w, "Ошибка при кодировании ответа", http.StatusInternalServerError)
+	}
 }
 
-// Константа для пароля API
-const (
-	API_UPDATE_PASSWORD = "secureUpdatePassword123" // Замените на свой сложный пароль
-)
+// handleMediaProcessing обрабатывает запросы на обработку медиафайлов (асинхронная операция)
+func (s *Server) handleMediaProcessing(w http.ResponseWriter, r *http.Request) {
+	// Проверяем аутентификацию (эта проверка уже выполняется в маршрутизаторе, но можно продублировать)
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey != API_UPDATE_PASSWORD {
+		w.Header().Set("WWW-Authenticate", "Basic realm=\"Restricted\"")
+		http.Error(w, "Unauthorized: Invalid API key", http.StatusUnauthorized)
+		return
+	}
 
-// authMiddleware проверяет пароль в заголовке X-API-Key
-func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		apiKey := r.Header.Get("X-API-Key")
-		if apiKey != API_UPDATE_PASSWORD {
-			w.Header().Set("WWW-Authenticate", "Basic realm=\"Restricted\"")
-			http.Error(w, "Unauthorized: Invalid API key", http.StatusUnauthorized)
+	var req MediaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Неверный формат запроса: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.ProductIDs) == 0 {
+		http.Error(w, "Список productIDs не может быть пустым", http.StatusBadRequest)
+		return
+	}
+
+	// Начинаем асинхронную обработку
+	go func() {
+		ctx := context.Background()
+		ctx = context.WithValue(ctx, "db", s.db)
+
+		// Получаем существующие ID из базы данных
+		ids, err := s.db.GetArticles()
+		if err != nil {
+			log.Printf("Ошибка при получении существующих статей: %v", err)
 			return
 		}
-		next(w, r)
-	}
+		ctx = context.WithValue(ctx, "exist_ids", ids)
+
+		// Получаем данные из удаленного API
+		remoteMedia, err := fetchRemoteMedia(req.ProductIDs)
+		if err != nil {
+			log.Printf("Ошибка при получении медиа из удаленного API: %v", err)
+			return
+		}
+
+		// Создаем канал для обработки статусов
+		statusChan := make(chan types.ProcessStatus, len(req.ProductIDs))
+
+		// Запускаем обработку статусов
+		go func() {
+			for status := range statusChan {
+				if err := s.db.UpdateImageStatus(status); err != nil {
+					log.Printf("Ошибка при обновлении статуса: %v", err)
+				}
+			}
+		}()
+
+		// Обрабатываем медиафайлы
+		if err := processMedia(ctx, remoteMedia, statusChan); err != nil {
+			log.Printf("Ошибка при обработке медиа: %v", err)
+		}
+
+		// После завершения обработки очищаем кэш для обновления статистики
+		imageCache.Clear()
+	}()
+
+	// Возвращаем статус 202 Accepted для асинхронных операций
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "processing",
+		"statusUrl": fmt.Sprintf("/api/v1/media/status?ids=%s",
+			strings.Trim(strings.Join(strings.Fields(fmt.Sprint(req.ProductIDs)), ","), "[]")),
+		"message": "Обработка изображений запущена",
+	})
 }
 
 // fetchRemoteMedia получает данные о медиафайлах из удаленного API
@@ -968,8 +916,7 @@ func downloadImage(ctx context.Context, url, outputPath string) error {
 
 // makeSquareImage преобразует изображение в квадратный формат
 func makeSquareImage(input io.Reader, outputPath string) error {
-	// Используем вашу существующую функцию makeSquareImage
-	// Здесь я просто добавил обработку ошибок
+	// Декодируем изображение
 	img, _, err := image.Decode(input)
 	if err != nil {
 		return fmt.Errorf("ошибка при декодировании изображения: %w", err)

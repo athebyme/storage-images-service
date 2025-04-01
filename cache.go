@@ -2,6 +2,8 @@ package main
 
 import (
 	"log"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -93,4 +95,27 @@ func (c *Cache) RecordMiss() {
 	c.statsMutex.Lock()
 	c.cacheMisses++
 	c.statsMutex.Unlock()
+}
+
+// isImageFile проверяет, является ли файл изображением по расширению
+func isImageFile(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp"
+}
+
+// getContentType определяет MIME-тип файла по расширению
+func getContentType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
 }
