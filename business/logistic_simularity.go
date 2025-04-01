@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-func similarity(a, b string) float64 {
+func Similarity(a, b string) float64 {
 	a = strings.TrimSpace(strings.ToLower(a))
 	b = strings.TrimSpace(strings.ToLower(b))
 
@@ -81,7 +81,7 @@ func SimilarityHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sim := similarity(reqBody.S1, reqBody.S2)
+	sim := Similarity(reqBody.S1, reqBody.S2)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
