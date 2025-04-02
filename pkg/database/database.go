@@ -1,7 +1,7 @@
 package database
 
 import (
-	"awesomeProject1/types"
+	"awesomeProject1/pkg/types"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -34,6 +34,7 @@ func (pc *PostgresConfiguration) GetConnectionString() string {
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		pc.Host, pc.Port, pc.User, pc.Pass, pc.Name)
 }
+
 func (pc *PostgresConfiguration) LoadConfig(filename string) (*PostgresConfiguration, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -56,6 +57,8 @@ type Driver interface {
 	GetAllImageStatuses() ([]types.ProcessStatus, error)
 	GetImageStatusesByProductIDs(productIDs []int) ([]types.ProcessStatus, error)
 	CreateRecords(records []Article) error
+	MigrateUp() error
+	Close() error
 }
 
 type PostgresDriver struct {
@@ -184,20 +187,20 @@ func (p *PostgresDriver) CreateRecord(record Article) error {
 			return fmt.Errorf("url is empty")
 		}
 	}
-	// Преобразуем массив фоток в JSON
+	// Convert photo array to JSON
 	photosJSON, err := json.Marshal(record.Photos)
 	if err != nil {
 		return fmt.Errorf("failed to serialize photos: %w", err)
 	}
 
-	// SQL-запрос для вставки записи
+	// SQL insert query
 	query := `
 		INSERT INTO storage.images (product_id, urls)
 		VALUES ($1, $2)
-		ON CONFLICT (articular) DO NOTHING;
+		ON CONFLICT (product_id) DO NOTHING;
 	`
 
-	// Выполняем запрос
+	// Execute query
 	p.Lock()
 	_, err = p.db.Exec(query, record.ID, photosJSON)
 	if err != nil {
@@ -207,8 +210,9 @@ func (p *PostgresDriver) CreateRecord(record Article) error {
 
 	return nil
 }
+
 func (p *PostgresDriver) CreateRecords(records []Article) error {
-	// SQL-запрос для вставки
+	// SQL insert query
 	query := `
         INSERT INTO storage.images (product_id, urls)
         VALUES ($1, $2::jsonb)
@@ -231,7 +235,7 @@ func (p *PostgresDriver) CreateRecords(records []Article) error {
 	defer stmt.Close()
 
 	for _, record := range records {
-		// Преобразование массива URLs в JSON
+		// Convert URLs array to JSON
 		urlsJSON, err := json.Marshal(record.Photos)
 		if err != nil {
 			tx.Rollback()
@@ -259,10 +263,10 @@ func (p *PostgresDriver) MigrateUp() error {
 		return err
 	}
 
-	// Укажите путь к миграциям (относительно рабочей директории)
+	// Specify path to migrations (relative to working directory)
 	m, err := migrate.NewWithDatabaseInstance(
-		"file://migrations", // Путь к папке с миграциями
-		"postgres",          // Название базы данных
+		"file://migrations", // Path to migrations folder
+		"postgres",          // Database name
 		driver,
 	)
 	if err != nil {
@@ -270,7 +274,7 @@ func (p *PostgresDriver) MigrateUp() error {
 		return err
 	}
 
-	// Применяем миграции
+	// Apply migrations
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		log.Fatalf("failed to apply migrations: %v", err)
 		return err

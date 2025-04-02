@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"awesomeProject1/metrics"
+	"awesomeProject1/pkg/metrics"
 	"net/http"
 	"time"
 )
